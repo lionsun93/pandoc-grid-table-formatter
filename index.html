@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Pandoc Grid Table Formatter (80 cols)</title>
+<style>
+  :root{--mono:SFMono-Regular,Menlo,Monaco,monospace}
+  body{font-family: Inter, system-ui, sans-serif; padding:20px; background:#f7fafc; color:#0f172a}
+  h1{font-size:18px;margin:0 0 12px}
+  .container{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+  textarea{width:100%;height:420px;font-family:var(--mono);font-size:13px;padding:12px;border-radius:8px;border:1px solid #cbd5e1;box-sizing:border-box;resize:vertical}
+  pre.output{white-space:pre;overflow:auto;height:420px;padding:12px;background:#fff;border-radius:8px;border:1px solid #cbd5e1;font-family:var(--mono);font-size:13px}
+  .controls{display:flex;gap:8px;margin-top:8px}
+  button{background:#0ea5a4;border:0;color:white;padding:8px 12px;border-radius:6px;cursor:pointer}
+  button.secondary{background:#64748b}
+  .small{font-size:13px;padding:6px 8px}
+  .hint{font-size:13px;color:#475569;margin-top:8px}
+  .row{display:flex;gap:8px;align-items:center}
+  label{font-size:13px}
+  footer{margin-top:14px;font-size:12px;color:#475569}
+  .flex-between{display:flex;justify-content:space-between;align-items:center}
+</style>
+</head>
+<body>
+  <h1>Pandoc grid table formatter — fixed width 80</h1>
+  <div class="flex-between"><div class="hint">Paste an unaligned pandoc-grid-style table (use <code>+---+---+</code> or <code>+===+===+</code> between rows). Columns may be unpadded and misaligned — the tool will align and wrap to 80 characters.</div>
+  <div><button id="sample" class="small secondary">Insert sample</button></div></div>
+
+  <div class="container">
+    <div>
+      <label for="input">Input (unformatted):</label>
+      <textarea id="input" placeholder="Paste your table here"></textarea>
+      <div class="controls">
+        <label style="font-size:13px;display:flex;align-items:center;gap:4px">Max width: <input id="maxWidthInput" type="number" value="80" min="20" style="width:70px"></label>
+        <button id="format">Beautify / Format</button>
+        <button id="clear" class="secondary small">Clear</button>
+        <button id="download" class="secondary small">Download .md</button>
+      </div>
+    </div>
+
+    <div>
+      <label for="output">Output (pandoc grid table):</label>
+      <pre id="output" class="output"> </pre>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="copy">Copy to clipboard</button>
+        <button id="preview" class="secondary small">Preview plain text</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>Table width is fixed to <strong>80</strong> characters. Words are wrapped inside cells (soft wrap inside the markdown source to fit columns).</footer>
+
+<script>
+(function(){
+  const input = document.getElementById('input');
+  const out = document.getElementById('output');
+  const btn = document.getElementById('format');
+  const copyBtn = document.getElementById('copy');
+  const clearBtn = document.getElementById('clear');
+  const sampleBtn = document.getElementById('sample');
+  const downloadBtn = document.getElementById('download');
+
+  // Simple generic sample (short)
+  const SAMPLE = `+---+----------------------------+
+|Name|Description                 |
++===+============================+
+|Alpha|Short text                 |
++---+----------------------------+
+|Beta|A somewhat longer example that will wrap to fit in the table column|
++---+----------------------------+`;
+
+  sampleBtn.addEventListener('click', ()=>{input.value = SAMPLE});
+
+  clearBtn.addEventListener('click', ()=>{input.value=''; out.textContent='';});
+
+  function isSeparatorLine(line){
+    const t = line.trim();
+    if(!t.startsWith('+') || !t.endsWith('+')) return false;
+    const interior = t.slice(1,-1);
+    return /^([-=]+\+)*[-=]+$/.test(interior);
+  }
+  function sepStyle(line){
+    return line.indexOf('=')>=0 ? '=' : '-';
+  }
+
+  function parseInput(text){
+    const lines = text.split(/\r?\n/);
+    const elements = [];
+    for(let i=0;i<lines.length;i++){
+      const l = lines[i];
+      if(isSeparatorLine(l)){
+        elements.push({type:'sep',style:sepStyle(l)});
+        continue;
+      }
+      const t = l.trim();
+      if(t.startsWith('|')){
+        const parts = l.split('|');
+        const cells = [];
+        for(let j=1;j<parts.length-1;j++){
+          cells.push(parts[j].trim());
+        }
+        elements.push({type:'row',cells});
+      } else if(t.length===0){
+        // skip blank
+      } else {
+        elements.push({type:'row',cells:[l.trim()]});
+      }
+    }
+    return elements;
+  }
+
+  function computeCols(elements){
+    let max = 0;
+    elements.forEach(e=>{ if(e.type==='row') max = Math.max(max, e.cells.length); });
+    if(max===0) max = 1;
+    return max;
+  }
+
+  // Distribute column widths by natural content size, constrained to totalWidth
+  function distributeWidths(cols, totalWidth, elements){
+    const MAX = totalWidth - (cols + 1); // internal space for characters
+    const natural = new Array(cols).fill(0);
+
+    // compute natural max width per column (longest unwrapped cell)
+    elements.forEach(e=>{
+      if(e.type==='row'){
+        e.cells.forEach((c,i)=>{
+          natural[i] = Math.max(natural[i], c.length);
+        });
+      }
+    });
+
+    // ensure minimum 3
+    for(let i=0;i<cols;i++) if(natural[i] < 3) natural[i] = 3;
+
+    let sum = natural.reduce((a,b)=>a+b,0);
+
+    if(sum <= MAX){
+      // there's room: distribute remaining space one by one to columns (prefer left)
+      let remaining = MAX - sum;
+      let i = 0;
+      while(remaining>0){ natural[i%cols]++; remaining--; i++; }
+      return natural;
+    }
+
+    // too wide: reduce from the widest columns until we fit
+    const widths = natural.slice();
+    while(sum > MAX){
+      // find index of widest column (prefer right-most if tie so left columns keep their size)
+      let maxIdx = 0;
+      for(let k=1;k<cols;k++){
+        if(widths[k] > widths[maxIdx]) maxIdx = k;
+      }
+      if(widths[maxIdx] > 3){ widths[maxIdx]--; sum--; } else {
+        // all columns are at min; break to avoid infinite loop
+        break;
+      }
+    }
+    return widths;
+  }
+
+  function wrapTextToWidth(text, width){
+    const words = text.split(/(\s+)/).filter(Boolean);
+    const lines = [];
+    let cur = '';
+    for(const w of words){
+      if(/^\s+$/.test(w)) continue;
+      if(cur.length===0){
+        if(w.length<=width) cur = w;
+        else { let idx=0; while(idx<w.length){ lines.push(w.slice(idx, idx+width)); idx+=width; } cur=''; }
+      } else {
+        if(cur.length + 1 + w.length <= width){ cur = cur + ' ' + w; }
+        else { lines.push(cur); if(w.length<=width) cur = w; else { let idx=0; while(idx<w.length){ lines.push(w.slice(idx, idx+width)); idx+=width; } cur=''; } }
+      }
+    }
+    if(cur.length>0) lines.push(cur);
+    if(lines.length===0) lines.push('');
+    return lines;
+  }
+
+  function format(elements){
+    let TOTAL = parseInt((document.getElementById('maxWidthInput')?.value||'80'),10) || 80;
+    const cols = computeCols(elements);
+    const widths = distributeWidths(cols, TOTAL, elements);
+
+    // normalize rows to have cols
+    elements.forEach(e=>{ if(e.type==='row'){ while(e.cells.length<cols) e.cells.push(''); } });
+
+    function renderSep(style){
+      let s = '+';
+      for(let i=0;i<cols;i++){
+        const ch = (style==='=') ? '=' : '-';
+        s += ch.repeat(widths[i]) + '+';
+      }
+      return s;
+    }
+
+    const outLines = [];
+
+    if(elements.length===0){
+      outLines.push(renderSep('-'));
+      outLines.push('|' + ' '.repeat(widths[0]) + '|');
+      outLines.push(renderSep('-'));
+      return outLines.join('\n');
+    }
+
+    for(let i=0;i<elements.length;i++){
+      const e = elements[i];
+      if(e.type==='sep'){
+        outLines.push(renderSep(e.style));
+        continue;
+      }
+      // wrap each cell according to its column width
+      const cellLines = e.cells.map((c,ci)=>wrapTextToWidth(c, widths[ci]));
+      const maxh = Math.max(...cellLines.map(a=>a.length));
+      for(let r=0;r<maxh;r++){
+        let line = '|';
+        for(let ci=0;ci<cols;ci++){
+          const piece = (cellLines[ci][r]!==undefined) ? cellLines[ci][r] : '';
+          line += piece + ' '.repeat(widths[ci] - piece.length) + '|';
+        }
+        outLines.push(line);
+      }
+    }
+
+    // ensure table ends with a sep
+    if(elements.length>0){
+      const last = elements[elements.length-1];
+      if(last.type !== 'sep') outLines.push(renderSep('-'));
+    }
+
+    // pad lines to TOTAL length
+    const fixed = outLines.map(l=> l + ' '.repeat(Math.max(0, TOTAL - l.length)));
+    return fixed.join('\n');
+  }
+
+  btn.addEventListener('click', ()=>{
+    try{
+      const elements = parseInput(input.value || '');
+      const result = format(elements);
+      out.textContent = result;
+    }catch(err){
+      out.textContent = 'Error: '+err.message;
+    }
+  });
+
+  copyBtn.addEventListener('click', async ()=>{
+    try{
+      await navigator.clipboard.writeText(out.textContent);
+      copyBtn.textContent = 'Copied!';
+      setTimeout(()=>copyBtn.textContent = 'Copy to clipboard',1200);
+    }catch(e){
+      alert('Copy failed: '+e);
+    }
+  });
+
+  downloadBtn.addEventListener('click', ()=>{
+    const blob = new Blob([out.textContent],{type:'text/markdown;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'table.md'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  });
+
+  document.getElementById('preview').addEventListener('click', ()=>{
+    alert(out.textContent || '(empty)');
+  });
+
+  input.addEventListener('paste', ()=>{ setTimeout(()=>btn.click(),50)});
+})();
+</script>
+</body>
+</html>
